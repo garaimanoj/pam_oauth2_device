@@ -14,6 +14,7 @@
 //#include <regex>
 #include <cstdio>
 #include <fstream>
+#include <memory>
 #include <nlohmann/json.hpp>
 
 #include "include/config.hpp"
@@ -28,6 +29,13 @@
 using json = nlohmann::json;
 
 constexpr char const *config_path = "/etc/pam_oauth2_device/config.json";
+
+// Prompt shown when "oauth":"accept_access_token" is enabled, offering the
+// client a chance to skip the device flow with a pre-existing access token
+// (eg one fetched locally from oidc-agent). This exact wording is a
+// client/server contract: client-side wrapper scripts match on it to decide
+// when to answer automatically, so don't reword it casually.
+constexpr char const *access_token_prompt = "OAuth2 access token (leave blank for device flow): ";
 
 
 //! Function to parse the PAM args (as supplied in the PAM config), updating our config
@@ -327,6 +335,80 @@ void show_prompt(pam_handle_t *pamh,
         free(response);
 }
 
+//! Ask the client (over the usual PAM conversation) for a pre-existing access
+//! token, eg one obtained locally from oidc-agent. Returns true and sets
+//! `token` iff the client supplied a non-empty response; an empty/missing
+//! response (the common case for clients that don't know about this prompt)
+//! just returns false so the caller can fall back to the device flow.
+bool get_access_token_from_conv(pam_handle_t *pamh, std::string &token)
+{
+    int pam_err;
+    struct pam_conv *conv;
+    struct pam_message msg;
+    const struct pam_message *msgp;
+    struct pam_response *resp;
+
+    pam_err = pam_get_item(pamh, PAM_CONV, (const void **)&conv);
+    if (pam_err != PAM_SUCCESS)
+        throw PamError("Access token prompt: failed to get PAM_CONV");
+
+    msg.msg_style = PAM_PROMPT_ECHO_OFF;
+    msg.msg = access_token_prompt;
+    msgp = &msg;
+    resp = NULL;
+    pam_err = (*conv->conv)(1, &msgp, &resp, conv->appdata_ptr);
+
+    token.clear();
+    bool got_token = false;
+    if (resp != NULL)
+    {
+        if (pam_err == PAM_SUCCESS && resp->resp != NULL)
+        {
+            token = resp->resp;
+            got_token = !token.empty();
+        }
+        if (resp->resp != NULL)
+            free(resp->resp);
+        free(resp);
+    }
+    return got_token;
+}
+
+//! Validate a client-supplied access token against userinfo_endpoint, reusing
+//! get_userinfo(). Returns nullptr (rather than throwing) for anything that
+//! should be treated as "token rejected, fall back to device flow": a bad
+//! transport (NetworkError), a response that doesn't parse into a userinfo
+//! shape (ResponseError), or a well-formed response missing the expected
+//! fields (get_userinfo throws a bare char const* for that, eg an IdP's
+//! {"error":"invalid_token"} body lacking "sub"/"name") - all of these are
+//! what an expired/invalid token produces in practice. A genuinely broken
+//! configuration (ConfigError/PamError) is left to propagate, same as it
+//! would during the device flow.
+std::unique_ptr<Userinfo> validate_access_token(Config const &config,
+                                                pam_oauth2_log &logger,
+                                                std::string const &token,
+                                                std::string const &userinfo_endpoint,
+                                                std::string const &username_attribute)
+{
+    try
+    {
+        return std::make_unique<Userinfo>(
+            get_userinfo(config, logger, userinfo_endpoint, token, username_attribute));
+    }
+    catch (NetworkError const &e)
+    {
+        logger.log(pam_oauth2_log::log_level_t::INFO,
+                   "client-supplied access token rejected: %s", e.what());
+        return nullptr;
+    }
+    catch (char const *msg)
+    {
+        logger.log(pam_oauth2_log::log_level_t::INFO,
+                   "client-supplied access token rejected: %s", msg);
+        return nullptr;
+    }
+}
+
 bool is_authorized(Config const &config,
                    pam_oauth2_log &logger,
                    std::string const &username_local,
@@ -501,6 +583,36 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 
 	if(bypass(config, logger, username_local))
 	    return PAM_IGNORE;
+
+	if(config.accept_access_token)
+	{
+	    std::string supplied_token;
+	    if(get_access_token_from_conv(pamh, supplied_token))
+	    {
+		std::unique_ptr<Userinfo> ui{
+		    validate_access_token(config, logger, supplied_token,
+					  config.userinfo_endpoint, config.username_attribute)};
+		if(ui)
+		{
+		    if(is_authorized(config, logger, username_local, *ui))
+		    {
+			logger.log(pam_oauth2_log::log_level_t::INFO,
+				  "%s is authorised via client-supplied access token", username_local);
+			return PAM_SUCCESS;
+		    }
+		    logger.log(pam_oauth2_log::log_level_t::INFO,
+			      "%s presented a valid access token but is not authorised", username_local);
+		    return PAM_AUTH_ERR;
+		}
+		logger.log(pam_oauth2_log::log_level_t::INFO,
+			  "client-supplied access token invalid/expired; falling back to device flow");
+	    }
+	    else
+	    {
+		logger.log(pam_oauth2_log::log_level_t::DEBUG,
+			  "no client-supplied access token; falling back to device flow");
+	    }
+	}
 
         make_authorization_request(
             config,

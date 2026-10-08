@@ -24,11 +24,6 @@ control is handed back to you for the normal interactive device flow - `expect` 
 ssh output to your terminal live the whole time, so nothing is ever silently hidden while it
 waits.
 
-An earlier version of this script used `sshpass` instead, but `sshpass` has no way to give up
-waiting for its one expected prompt and hand over to the user - if the prompt never arrives (eg
-`accept_access_token` is `false`), it just hangs with no output at all. `expect` handles that
-case correctly, so it replaced `sshpass` here.
-
 ## Notes
 
 The prompt text the script matches against must match the `access_token_prompt` constant in

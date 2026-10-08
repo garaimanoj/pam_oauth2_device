@@ -30,11 +30,8 @@ using json = nlohmann::json;
 
 constexpr char const *config_path = "/etc/pam_oauth2_device/config.json";
 
-// Prompt shown when "oauth":"accept_access_token" is enabled, offering the
-// client a chance to skip the device flow with a pre-existing access token
-// (eg one fetched locally from oidc-agent). This exact wording is a
-// client/server contract: client-side wrapper scripts match on it to decide
-// when to answer automatically, so don't reword it casually.
+// Prompt used when accept_access_token is enabled. Client scripts match on
+// this text, so keep it stable (see util/ssh-oidc-agent).
 constexpr char const *access_token_prompt = "OAuth2 access token (leave blank for device flow): ";
 
 
@@ -335,11 +332,8 @@ void show_prompt(pam_handle_t *pamh,
         free(response);
 }
 
-//! Ask the client (over the usual PAM conversation) for a pre-existing access
-//! token, eg one obtained locally from oidc-agent. Returns true and sets
-//! `token` iff the client supplied a non-empty response; an empty/missing
-//! response (the common case for clients that don't know about this prompt)
-//! just returns false so the caller can fall back to the device flow.
+//! Ask the client for a pre-existing access token via the PAM conversation.
+//! Returns true and sets `token` if a non-empty response was supplied.
 bool get_access_token_from_conv(pam_handle_t *pamh, std::string &token)
 {
     int pam_err;
@@ -374,16 +368,8 @@ bool get_access_token_from_conv(pam_handle_t *pamh, std::string &token)
     return got_token;
 }
 
-//! Validate a client-supplied access token against userinfo_endpoint, reusing
-//! get_userinfo(). Returns nullptr (rather than throwing) for anything that
-//! should be treated as "token rejected, fall back to device flow": a bad
-//! transport (NetworkError), a response that doesn't parse into a userinfo
-//! shape (ResponseError), or a well-formed response missing the expected
-//! fields (get_userinfo throws a bare char const* for that, eg an IdP's
-//! {"error":"invalid_token"} body lacking "sub"/"name") - all of these are
-//! what an expired/invalid token produces in practice. A genuinely broken
-//! configuration (ConfigError/PamError) is left to propagate, same as it
-//! would during the device flow.
+//! Validate a token via get_userinfo(). Returns nullptr (not throwing) for a
+//! rejected/expired token; real config/PAM errors still propagate.
 std::unique_ptr<Userinfo> validate_access_token(Config const &config,
                                                 pam_oauth2_log &logger,
                                                 std::string const &token,

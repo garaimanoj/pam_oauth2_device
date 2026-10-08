@@ -31,10 +31,7 @@ if {[catch {exec oidc-token $shortname} token]} {
 
 # How long to wait for the module's access-token prompt before assuming the
 # server doesn't have accept_access_token enabled and handing the keyboard
-# back to the user. Output from ssh is shown live either way (expect mirrors
-# the spawned process's output to the terminal by default), so this timeout
-# only bounds how long the user has to wait before they can type themselves
-# - it never hides anything.
+# back to the user.
 set timeout 10
 
 # -tt forces a real pty so the device-flow fallback (QR/URL prompt, shell)
